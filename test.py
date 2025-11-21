@@ -5,6 +5,7 @@ import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
+from sklearn.metrics import confusion_matrix
 from transformers import (
     AutoTokenizer,
     AutoModelForSequenceClassification,
@@ -15,6 +16,7 @@ from transformers import (
 from torch.utils.tensorboard import SummaryWriter
 import os
 import subprocess
+from pathlib import Path
 
 # ---- Proxy ---
 result = subprocess.run(
@@ -39,11 +41,42 @@ LEARNING_RATE = 2e-5
 EPOCHS = 1
 TEST_SIZE = 0.1
 
+RESUME_FROM_CHECKPOINT = True
+
 TRAIN_PATH = "data/train.csv"
 TEST_PATH = "data/test.csv"
 SUBMISSION_PATH = "data/sample_submission.csv"
 OUTPUT_DIR = "./llm_preference_model_prototype"
 TENSORBOARD_DIR = "./tf-logs"
+
+
+# --- Find latest checkpoint ---
+def get_latest_checkpoint(output_dir):
+    """Find the most recent checkpoint in the output directory."""
+    output_path = Path(output_dir)
+    if not output_path.exists():
+        return None
+
+    checkpoints = [
+        d for d in output_path.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")
+    ]
+    if not checkpoints:
+        return None
+
+    checkpoints_with_steps = []
+    for ckpt in checkpoints:
+        try:
+            step = int(ckpt.name.split("-")[1])
+            checkpoints_with_steps.append((step, ckpt))
+        except (IndexError, ValueError):
+            continue
+
+    if not checkpoints_with_steps:
+        return None
+
+    latest_checkpoint = max(checkpoints_with_steps, key=lambda x: x[0])[1]
+    return str(latest_checkpoint)
+
 
 # --- Data ---
 print("Loading data...")
@@ -171,14 +204,25 @@ class TensorBoardCallback(TrainerCallback):
         self.writer.close()
 
 
+# --- Check for checkpoint ---
+checkpoint_to_resume = None
+if RESUME_FROM_CHECKPOINT:
+    checkpoint_to_resume = get_latest_checkpoint(OUTPUT_DIR)
+    if checkpoint_to_resume:
+        print(f"Found checkpoint to resume from: {checkpoint_to_resume}")
+    else:
+        print("No checkpoint found. Starting training from scratch.")
+else:
+    print("RESUME_FROM_CHECKPOINT is disabled. Starting training from scratch.")
+
 # --- Model and Tokenizer ---
 print("Initializing model and tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)
 
 # --- Initialize TensorBoard Writer ---
-print(f"Initializing TensorBoard. Run: tensorboard --logdir={TENSORBOARD_DIR}")
-writer = SummaryWriter(log_dir=TENSORBOARD_DIR)
+# Create a custom writer that won't conflict with Trainer's tensorboard integration
+writer = SummaryWriter(log_dir=os.path.join(TENSORBOARD_DIR, "custom_metrics"))
 
 # Log hyperparameters
 hparams = {
@@ -188,6 +232,7 @@ hparams = {
     "epochs": EPOCHS,
     "max_length": MAX_LENGTH,
     "prototype_frac": PROTOTYPE_FRAC,
+    "resume_from_checkpoint": RESUME_FROM_CHECKPOINT,
 }
 writer.add_text("hyperparameters", str(hparams), 0)
 
@@ -260,7 +305,7 @@ trainer = Trainer(
 
 # --- Train ---
 print("Starting training...")
-trainer.train()
+trainer.train(resume_from_checkpoint=checkpoint_to_resume)
 
 # --- Validation Performance Analysis ---
 print("Analyzing validation performance...")
@@ -269,9 +314,6 @@ val_logits = torch.from_numpy(val_predictions.predictions)
 val_probs = F.softmax(val_logits, dim=1).numpy()
 val_preds = np.argmax(val_probs, axis=1)
 val_labels = val_predictions.label_ids
-
-# Log confusion matrix data
-from sklearn.metrics import confusion_matrix
 
 cm = confusion_matrix(val_labels, val_preds)
 print("Validation Confusion Matrix:")
