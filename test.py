@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
@@ -162,17 +163,17 @@ print("Starting training...")
 trainer.train()
 
 # --- Test ---
-print("Training finished. Generating predictions on test set...")
+print("Generating predictions on test set...")
 predictions = trainer.predict(test_dataset)
-logits = predictions.predictions
-preds_indices = np.argmax(logits, axis=1)
+logits = torch.from_numpy(predictions.predictions)
+probs = F.softmax(logits, dim=1).numpy()
 
 # --- Submission ---
 print("Creating submission file...")
 submission_df = pd.DataFrame({"id": df_test["id"]})
-submission_df["winner_model_a"] = (preds_indices == 0).astype(int)
-submission_df["winner_model_b"] = (preds_indices == 1).astype(int)
-submission_df["winner_model_tie"] = (preds_indices == 2).astype(int)
+submission_df["winner_model_a"] = probs[:, 0]
+submission_df["winner_model_b"] = probs[:, 1]
+submission_df["winner_model_tie"] = probs[:, 2]
 
 submission_df.to_csv("submission_test.csv", index=False)
 print("'submission_test.csv' created.")
