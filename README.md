@@ -9,6 +9,7 @@ Set PROTOTYPE_FRAC to change the proportion of training set used
 Working on testing and tuning  
 
 # File Structure
+```
 ECE-143-Group-23/
 ├── saved_deberta_model_debug/                         # Debug snapshot of DeBERTa model (KEEP???)
 │
@@ -26,7 +27,7 @@ ECE-143-Group-23/
 ├── .gitattributes                                     # Indicates which files belong to Git LFS
 ├── _____.py                                           # File containing model to run
 └── README.md                                          # Project documentation
-
+```
 
 # Third-Party Modules:
 - Numerical / Data Libraries
@@ -67,3 +68,4 @@ conda activate ece143
 - Make sure to run `git lfs install` from within your local clone of the repo
 
 - After that, you can commit and push normally
+
