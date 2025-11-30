@@ -53,13 +53,15 @@ ECE-143-Group-23/
 - Visualization libraries
   - matplotlib.pyplot
   - seaborn
-  - 
-# Environment Config
+
+# How to Run the Code
+
+## Environment Config
 ```
 conda env create -f environment.yml  
 conda activate ece143  
   ```
-# Setup Instructions: Git LFS
+## Setup Instructions: Git LFS
 - **Download and install Git LFS:** https://git-lfs.com/
 - Alternatively, using a package manager:
     - macOS (Homebrew): `brew install git-lfs`
@@ -68,4 +70,7 @@ conda activate ece143
 - Make sure to run `git lfs install` from within your local clone of the repo
 
 - After that, you can commit and push normally
+
+## Running the Code:
+- **TODO**
 
