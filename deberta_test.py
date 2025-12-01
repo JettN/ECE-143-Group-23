@@ -1,8 +1,9 @@
+import random
 import pandas as pd
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import confusion_matrix
@@ -12,6 +13,7 @@ from transformers import (
     TrainingArguments,
     Trainer,
     TrainerCallback,
+    DataCollatorWithPadding,
 )
 from torch.utils.tensorboard import SummaryWriter
 import os
@@ -100,52 +102,57 @@ if PROTOTYPE_FRAC < 1.0:
     print(f"Prototype dataset size: {len(df_train)}")
 
 
-# --- Smart Truncation Dataset ---
-class SmartTruncationDataset(Dataset):
-    def __init__(self, df, tokenizer, max_length, is_test=False, augment=False):
+# --- Cross-Encoder Dataset ---
+class ConcatenatedPreferenceDataset(Dataset):
+    def __init__(self, df, tokenizer, max_length=1024, is_test=False, augment=False):
         self.df = df
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.is_test = is_test
         self.augment = augment
 
-        self.prompts = df["prompt"].values
-        self.response_as = df["response_a"].values
-        self.response_bs = df["response_b"].values
+        self.prompts = df["prompt"].values.astype(str)
+        self.response_as = df["response_a"].values.astype(str)
+        self.response_bs = df["response_b"].values.astype(str)
         if not self.is_test:
             self.labels = df["label"].values
 
     def __len__(self):
         return len(self.df)
 
-    def _smart_truncate(self, text, max_tokens):
-        """Truncates text to max_tokens keeping Head + Tail."""
-        tokens = self.tokenizer.encode(text, add_special_tokens=False)
-        if len(tokens) <= max_tokens:
-            return tokens
-        else:
-            head_len = max_tokens // 2
-            tail_len = max_tokens - head_len
-            return tokens[:head_len] + tokens[-tail_len:]
-
     def __getitem__(self, idx):
-        prompt = str(self.prompts[idx])
-        resp_a = str(self.response_as[idx])
-        resp_b = str(self.response_bs[idx])
+        prompt = self.prompts[idx]
+        resp_a = self.response_as[idx]
+        resp_b = self.response_bs[idx]
 
         if not self.is_test:
             label = self.labels[idx]
 
-        if self.augment and torch.rand(1).item() > 0.5:
+        # Augmentation: Swap A and B randomly
+        if self.augment and random.random() > 0.5:
             resp_a, resp_b = resp_b, resp_a
             if not self.is_test:
-                label = 0 if label == 1 else (1 if label == 0 else 2)
+                if label == 0:
+                    label = 1
+                elif label == 1:
+                    label = 0
+                # Tie (2) remains 2
 
-        prompt_budget = 512
-        response_budget = (self.max_length - prompt_budget - 10) // 2
-        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)[:prompt_budget]
-        resp_a_ids = self._smart_truncate(resp_a, response_budget)
-        resp_b_ids = self._smart_truncate(resp_b, response_budget)
+        # Format: [CLS] Prompt [SEP] Resp A [SEP] Resp B [SEP]
+        prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
+        # We need space for 1 CLS and 3 SEPs (Total 4 special tokens)
+        total_special = 4
+        available_for_resps = self.max_length - len(prompt_ids) - total_special
+
+        # If prompt is too long, truncate it (keep end usually better for instructions)
+        if available_for_resps < 100:
+            prompt_ids = prompt_ids[-512:]  # Keep last 512 tokens of prompt
+            available_for_resps = self.max_length - len(prompt_ids) - total_special
+
+        max_resp_len = available_for_resps // 2
+
+        resp_a_ids = self.tokenizer.encode(resp_a, add_special_tokens=False)[:max_resp_len]
+        resp_b_ids = self.tokenizer.encode(resp_b, add_special_tokens=False)[:max_resp_len]
 
         input_ids = (
             [self.tokenizer.cls_token_id]
@@ -157,28 +164,29 @@ class SmartTruncationDataset(Dataset):
             + [self.tokenizer.sep_token_id]
         )
 
+        len_p = len(prompt_ids) + 2  # CLS + Prompt + SEP
+        len_a = len(resp_a_ids) + 1  # A + SEP
+        len_b = len(resp_b_ids) + 1  # B + SEP
+        # 0 for Prompt, 1 for BOTH responses.
+        token_type_ids = [0] * len_p + [1] * (len_a + len_b)
+
+        # Attention Mask
         attention_mask = [1] * len(input_ids)
-        padding_length = self.max_length - len(input_ids)
 
-        if padding_length > 0:
-            input_ids = input_ids + [self.tokenizer.pad_token_id] * padding_length
-            attention_mask = attention_mask + [0] * padding_length
+        out = {
+            "input_ids": input_ids,
+            "token_type_ids": token_type_ids,
+            "attention_mask": attention_mask,
+        }
 
-        if self.is_test:
-            return {
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-            }
-        else:
-            return {
-                "input_ids": torch.tensor(input_ids, dtype=torch.long),
-                "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
-                "labels": torch.tensor(label, dtype=torch.long),
-            }
+        if not self.is_test:
+            out["labels"] = int(label)
+
+        return out
 
 
 # --- TensorBoard Callback ---
-class AdvancedTensorBoardCallback(TrainerCallback):
+class TensorBoardCallback(TrainerCallback):
     """
     Logs gradients and weights.
     Standard metrics (Loss/Acc) are handled automatically by Trainer(report_to='tensorboard').
@@ -226,10 +234,10 @@ train_df, val_df = train_test_split(
     df_train, test_size=TEST_SIZE, random_state=42, stratify=df_train["label"]
 )
 
-# Use SmartTruncationDataset
-train_dataset = SmartTruncationDataset(train_df, tokenizer, MAX_LENGTH, augment=True)
-val_dataset = SmartTruncationDataset(val_df, tokenizer, MAX_LENGTH, augment=False)
-test_dataset = SmartTruncationDataset(df_test, tokenizer, MAX_LENGTH, is_test=True)
+# Use PairwisePreferenceDataset
+train_dataset = ConcatenatedPreferenceDataset(train_df, tokenizer, MAX_LENGTH, augment=True)
+val_dataset = ConcatenatedPreferenceDataset(val_df, tokenizer, MAX_LENGTH, augment=False)
+test_dataset = ConcatenatedPreferenceDataset(df_test, tokenizer, MAX_LENGTH, is_test=True)
 
 print(f"Training with {len(train_dataset)} samples, validating with {len(val_dataset)} samples.")
 
@@ -252,6 +260,7 @@ training_args = TrainingArguments(
     per_device_eval_batch_size=BATCH_SIZE,
     gradient_accumulation_steps=GRAD_ACCUM_STEPS,
     learning_rate=LEARNING_RATE,
+    warmup_ratio=0.1,
     logging_steps=10,
     eval_strategy="steps",
     eval_steps=100,
@@ -276,7 +285,8 @@ trainer = Trainer(
     train_dataset=train_dataset,
     eval_dataset=val_dataset,
     compute_metrics=compute_metrics,
-    callbacks=[AdvancedTensorBoardCallback(writer)],
+    callbacks=[TensorBoardCallback(writer)],
+    data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
 )
 
 # --- Train ---
