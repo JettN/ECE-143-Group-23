@@ -20,7 +20,7 @@ import os
 import subprocess
 from pathlib import Path
 
-# ---- Proxy ---
+# Load proxy settings from network configuration
 result = subprocess.run(
     'bash -c "source /etc/network_turbo && env | grep proxy"',
     shell=True,
@@ -33,7 +33,7 @@ for line in output.splitlines():
         var, value = line.split("=", 1)
         os.environ[var] = value
 
-# --- Config ---
+# Model and training configuration
 MODEL_NAME = "microsoft/deberta-v3-base"
 
 MAX_LENGTH = 2048
@@ -41,7 +41,7 @@ BATCH_SIZE = 3
 GRAD_ACCUM_STEPS = 5
 LEARNING_RATE = 1e-5
 EPOCHS = 3
-PROTOTYPE_FRAC = 1
+PROTOTYPE_FRAC = 1  # Use full dataset; set < 1.0 for quick prototyping
 TEST_SIZE = 0.1
 
 GRADIENT_CHECKPOINTING = False
@@ -54,9 +54,8 @@ TENSORBOARD_DIR = "./tf-logs"
 RUN_NAME = "trunc_2048_run"
 
 
-# --- Find latest checkpoint ---
 def get_latest_checkpoint(output_dir):
-    """Find the most recent checkpoint in the output directory."""
+    """Find the most recent checkpoint by step number."""
     output_path = Path(output_dir)
     if not output_path.exists():
         return None
@@ -82,11 +81,11 @@ def get_latest_checkpoint(output_dir):
     return str(latest_checkpoint)
 
 
-# --- Data ---
 print("Loading data...")
 df_train = pd.read_csv(TRAIN_PATH, engine="python")
 df_test = pd.read_csv(TEST_PATH, engine="python")
 
+# Convert one-hot encoded winner columns to single label: 0=A wins, 1=B wins, 2=tie
 df_train["label"] = (
     df_train["winner_model_a"] * 0 + df_train["winner_model_b"] * 1 + df_train["winner_tie"] * 2
 )
@@ -102,8 +101,14 @@ if PROTOTYPE_FRAC < 1.0:
     print(f"Prototype dataset size: {len(df_train)}")
 
 
-# --- Cross-Encoder Dataset ---
 class ConcatenatedPreferenceDataset(Dataset):
+    """
+    Cross-encoder dataset for preference learning.
+    
+    Encodes both responses in a single sequence: [CLS] prompt [SEP] response_a [SEP] response_b [SEP]
+    This allows the model to directly compare responses in context.
+    """
+    
     def __init__(self, df, tokenizer, max_length=1024, is_test=False, augment=False):
         self.df = df
         self.tokenizer = tokenizer
@@ -128,7 +133,7 @@ class ConcatenatedPreferenceDataset(Dataset):
         if not self.is_test:
             label = self.labels[idx]
 
-        # Augmentation: Swap A and B randomly
+        # Data augmentation: randomly swap responses to reduce positional bias
         if self.augment and random.random() > 0.5:
             resp_a, resp_b = resp_b, resp_a
             if not self.is_test:
@@ -136,19 +141,18 @@ class ConcatenatedPreferenceDataset(Dataset):
                     label = 1
                 elif label == 1:
                     label = 0
-                # Tie (2) remains 2
 
-        # Format: [CLS] Prompt [SEP] Resp A [SEP] Resp B [SEP]
+        # Tokenize and handle length constraints
         prompt_ids = self.tokenizer.encode(prompt, add_special_tokens=False)
-        # We need space for 1 CLS and 3 SEPs (Total 4 special tokens)
-        total_special = 4
+        total_special = 4  # CLS + 3 SEP tokens
         available_for_resps = self.max_length - len(prompt_ids) - total_special
 
-        # If prompt is too long, truncate it (keep end usually better for instructions)
+        # Truncate prompt from the start if necessary (keep recent context)
         if available_for_resps < 100:
-            prompt_ids = prompt_ids[-512:]  # Keep last 512 tokens of prompt
+            prompt_ids = prompt_ids[-512:]
             available_for_resps = self.max_length - len(prompt_ids) - total_special
 
+        # Split remaining space equally between responses
         max_resp_len = available_for_resps // 2
 
         resp_a_ids = self.tokenizer.encode(resp_a, add_special_tokens=False)[:max_resp_len]
@@ -164,13 +168,12 @@ class ConcatenatedPreferenceDataset(Dataset):
             + [self.tokenizer.sep_token_id]
         )
 
-        len_p = len(prompt_ids) + 2  # CLS + Prompt + SEP
-        len_a = len(resp_a_ids) + 1  # A + SEP
-        len_b = len(resp_b_ids) + 1  # B + SEP
-        # 0 for Prompt, 1 for BOTH responses.
+        # Token type IDs: 0 for prompt, 1 for both responses
+        len_p = len(prompt_ids) + 2  # CLS + prompt + SEP
+        len_a = len(resp_a_ids) + 1
+        len_b = len(resp_b_ids) + 1
         token_type_ids = [0] * len_p + [1] * (len_a + len_b)
 
-        # Attention Mask
         attention_mask = [1] * len(input_ids)
 
         out = {
@@ -185,12 +188,8 @@ class ConcatenatedPreferenceDataset(Dataset):
         return out
 
 
-# --- TensorBoard Callback ---
 class TensorBoardCallback(TrainerCallback):
-    """
-    Logs gradients and weights.
-    Standard metrics (Loss/Acc) are handled automatically by Trainer(report_to='tensorboard').
-    """
+    """Track gradient norms during training for debugging."""
 
     def __init__(self, writer):
         self.writer = writer
@@ -210,7 +209,7 @@ class TensorBoardCallback(TrainerCallback):
         self.writer.close()
 
 
-# --- Check for checkpoint ---
+# Check for existing checkpoint
 checkpoint_to_resume = None
 if RESUME_FROM_CHECKPOINT:
     checkpoint_to_resume = get_latest_checkpoint(OUTPUT_DIR)
@@ -219,22 +218,18 @@ if RESUME_FROM_CHECKPOINT:
     else:
         print("No checkpoint found. Starting training from scratch.")
 
-# --- Model and Tokenizer ---
 print("Initializing model and tokenizer...")
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
 model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)
 
-# Initialize Writer
 tensorboard_log_dir = os.path.join(TENSORBOARD_DIR, RUN_NAME)
 writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
-# --- Trainer ---
 print("Splitting data...")
 train_df, val_df = train_test_split(
     df_train, test_size=TEST_SIZE, random_state=42, stratify=df_train["label"]
 )
 
-# Use PairwisePreferenceDataset
 train_dataset = ConcatenatedPreferenceDataset(train_df, tokenizer, MAX_LENGTH, augment=True)
 val_dataset = ConcatenatedPreferenceDataset(val_df, tokenizer, MAX_LENGTH, augment=False)
 test_dataset = ConcatenatedPreferenceDataset(df_test, tokenizer, MAX_LENGTH, is_test=True)
@@ -243,6 +238,7 @@ print(f"Training with {len(train_dataset)} samples, validating with {len(val_dat
 
 
 def compute_metrics(p):
+    """Calculate overall and per-class accuracy for multi-class evaluation."""
     preds = np.argmax(p.predictions, axis=1)
     labels = p.label_ids
     per_class_acc = {}
@@ -289,11 +285,10 @@ trainer = Trainer(
     data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
 )
 
-# --- Train ---
 print("Starting training...")
 trainer.train(resume_from_checkpoint=checkpoint_to_resume)
 
-# --- Validation Performance Analysis ---
+# Analyze validation set performance
 print("Analyzing validation performance...")
 val_predictions = trainer.predict(val_dataset)
 val_logits = torch.from_numpy(val_predictions.predictions)
@@ -305,13 +300,13 @@ cm = confusion_matrix(val_labels, val_preds)
 print("Validation Confusion Matrix:")
 print(cm)
 
-# --- Test ---
+# Generate test predictions
 print("Generating predictions on test set...")
 predictions = trainer.predict(test_dataset)
 logits = torch.from_numpy(predictions.predictions)
 probs = F.softmax(logits, dim=1).numpy()
 
-# --- Submission ---
+# Create submission file
 print("Creating submission file...")
 submission_df = pd.DataFrame({"id": df_test["id"]})
 submission_df["winner_model_a"] = probs[:, 0]
