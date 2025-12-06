@@ -29,7 +29,7 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoModelForSequenceClassification, AutoTokenizer, DataCollatorWithPadding
 
 try:
     from .deberta_test import ConcatenatedPreferenceDataset, load_and_preprocess_data
@@ -85,30 +85,39 @@ def comprehensive_evaluation(
         Dictionary with evaluation metrics and predictions
     """
     print("Running inference on evaluation set...")
+    from torch.utils.data import DataLoader
+    
+    # Use batching for much faster inference
+    batch_size = 8 if device == "cpu" else 32
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, collate_fn=data_collator)
+    
     all_logits = []
     all_labels = []
     all_probs = []
     
     model.eval()
     with torch.no_grad():
-        for i in range(len(dataset)):
-            sample = dataset[i]
-            input_ids = torch.tensor(sample["input_ids"]).unsqueeze(0).to(device)
-            attention_mask = torch.tensor(sample["attention_mask"]).unsqueeze(0).to(device)
+        for batch_idx, batch in enumerate(dataloader):
+            if batch_idx % 50 == 0:
+                print(f"  Processing batch {batch_idx + 1}/{len(dataloader)}...")
+            
+            input_ids = batch["input_ids"].to(device)
+            attention_mask = batch["attention_mask"].to(device)
             
             outputs = model(input_ids=input_ids, attention_mask=attention_mask)
-            logits = outputs.logits.cpu().numpy()[0]
-            probs = torch.softmax(torch.from_numpy(logits), dim=0).numpy()
+            logits = outputs.logits.cpu().numpy()
+            probs = torch.softmax(torch.from_numpy(logits), dim=1).numpy()
             
             all_logits.append(logits)
             all_probs.append(probs)
-            if "labels" in sample:
-                all_labels.append(sample["labels"])
+            if "labels" in batch:
+                all_labels.extend(batch["labels"].cpu().numpy().tolist())
             else:
-                all_labels.append(-1)  # Test set has no labels
+                all_labels.extend([-1] * len(logits))
     
-    all_logits = np.array(all_logits)
-    all_probs = np.array(all_probs)
+    all_logits = np.vstack(all_logits)
+    all_probs = np.vstack(all_probs)
     all_labels = np.array(all_labels)
     all_preds = np.argmax(all_probs, axis=1)
     
@@ -307,6 +316,12 @@ def main():
         default=0.1,
         help="Test size for train/val split (default: 0.1)",
     )
+    parser.add_argument(
+        "--max_samples",
+        type=int,
+        default=None,
+        help="Maximum number of samples to evaluate (for quick testing, default: None = all samples)",
+    )
     
     args = parser.parse_args()
     
@@ -328,6 +343,11 @@ def main():
     _, df_val = train_test_split(
         df_train, test_size=args.test_size, random_state=42, stratify=df_train["label"]
     )
+    
+    # Limit samples if specified (for quick testing)
+    if args.max_samples and args.max_samples < len(df_val):
+        print(f"Limiting evaluation to {args.max_samples} samples for quick testing...")
+        df_val = df_val.sample(n=args.max_samples, random_state=42).reset_index(drop=True)
     
     # Create dataset
     val_dataset = ConcatenatedPreferenceDataset(df_val, tokenizer, args.max_length, augment=False)
