@@ -5,8 +5,8 @@ import json
 import pathlib
 import src.preprocessing.data_preprocssing_funcs as dpf
 
-SCRIPT_DIR = pathlib.Path(__file__).parent.absolute()
-DATA_PATH = SCRIPT_DIR / "data"
+PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent.parent
+DATA_PATH = PROJECT_ROOT / "data"
 
 data = pd.read_csv(DATA_PATH / "train.csv")
 test_data = pd.read_csv(DATA_PATH / "test.csv")
