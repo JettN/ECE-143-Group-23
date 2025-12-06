@@ -33,8 +33,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import src.preprocessing.data_preprocessing as dp
-
 
 # ---------------------------------------------------------------------------
 # Environment & configuration
@@ -59,17 +57,21 @@ for line in output.splitlines():
 MODEL_NAME = "microsoft/deberta-v3-base"
 
 # Sequence and training hyperparameters
-MAX_LENGTH = 2048                 # Max tokens for [prompt + responses + special tokens]
-BATCH_SIZE = 3                    # Per-device batch size
-GRAD_ACCUM_STEPS = 5              # Gradient accumulation for effective larger batch
+MAX_LENGTH = 2048  # Max tokens for [prompt + responses + special tokens]
+BATCH_SIZE = 3  # Per-device batch size
+GRAD_ACCUM_STEPS = 5  # Gradient accumulation for effective larger batch
 LEARNING_RATE = 1e-5
 EPOCHS = 3
-PROTOTYPE_FRAC = 1                # < 1.0 if you want to train on a smaller subset
-TEST_SIZE = 0.1                   # Validation fraction for train/val split
+PROTOTYPE_FRAC = 1  # < 1.0 if you want to train on a smaller subset
+TEST_SIZE = 0.1  # Validation fraction for train/val split
 
 # Training options
-GRADIENT_CHECKPOINTING = False    # Set True to save memory at cost of compute
-RESUME_FROM_CHECKPOINT = False    # Set True to resume from last saved checkpoint
+GRADIENT_CHECKPOINTING = False  # Set True to save memory at cost of compute
+RESUME_FROM_CHECKPOINT = False  # Set True to resume from last saved checkpoint
+
+# Dataset directories
+TRAIN_PATH = "data/train.csv"
+TEST_PATH = "data/test.csv"
 
 # Output directories
 OUTPUT_DIR = "./llm_preference_model_smart"
@@ -95,8 +97,7 @@ def get_latest_checkpoint(output_dir: str) -> str | None:
         return None
 
     checkpoints = [
-        d for d in output_path.iterdir()
-        if d.is_dir() and d.name.startswith("checkpoint-")
+        d for d in output_path.iterdir() if d.is_dir() and d.name.startswith("checkpoint-")
     ]
     if not checkpoints:
         return None
@@ -121,25 +122,19 @@ def get_latest_checkpoint(output_dir: str) -> str | None:
 # Data loading & preprocessing (using external preprocessed module)
 # ---------------------------------------------------------------------------
 
-print("Loading preprocessed data from data_preprocessing.py...")
+print("Loading data...")
 
-# dp.df: training DataFrame with columns like:
-# ['id', 'model_a', 'model_b', 'prompt', 'response_a', 'response_b', 'winner']
-df_train = dp.df.copy()
+df_train = pd.read_csv(TRAIN_PATH, engine="python")
+df_test = pd.read_csv(TEST_PATH, engine="python")
 
-# dp.test_data: test DataFrame where prompt/response_* are lists of strings
-df_test = dp.test_data.copy()
+# Convert one-hot encoded winner columns to single label: 0=A wins, 1=B wins, 2=tie
+df_train["label"] = (
+    df_train["winner_model_a"] * 0 + df_train["winner_model_b"] * 1 + df_train["winner_tie"] * 2
+)
+# Drop any rows with missing text (defensive cleaning)
+df_train = df_train.dropna(subset=["prompt", "response_a", "response_b"])
+print(f"Full dataset size: {len(df_train)}")
 
-# Map `winner` -> `label` to match the classification scheme used by the model.
-# Preprocessing script: winner = 0 (tie), 1 (model_a wins), 2 (model_b wins)
-# Model labels: 0 (A wins), 1 (B wins), 2 (tie)
-winner_to_label = {1: 0, 2: 1, 0: 2}
-df_train["label"] = df_train["winner"].map(winner_to_label)
-
-# Drop any rows with missing text/labels (defensive cleaning)
-df_train = df_train.dropna(subset=["prompt", "response_a", "response_b", "label"])
-
-print(f"Full preprocessed dataset size: {len(df_train)}")
 if PROTOTYPE_FRAC < 1.0:
     # Optionally downsample for quick prototyping while keeping label distribution balanced
     print(f"Creating a {PROTOTYPE_FRAC * 100}% stratified prototype dataset...")
@@ -151,26 +146,11 @@ if PROTOTYPE_FRAC < 1.0:
     )
     print(f"Prototype dataset size: {len(df_train)}")
 
-# Ensure prompts/responses are plain strings in the train set
-for col in ["prompt", "response_a", "response_b"]:
-    df_train[col] = df_train[col].astype(str)
-
-# For df_test, fields may be lists of strings; we join them into single strings
-for col in ["prompt", "response_a", "response_b"]:
-    df_test[col] = df_test[col].apply(
-        lambda x: " ".join(x) if isinstance(x, list) else str(x)
-    )
-
-print("Example preprocessed train row:")
-print(df_train.iloc[0][["prompt", "response_a", "response_b", "label"]])
-
-print("Example preprocessed test row:")
-print(df_test.iloc[0][["prompt", "response_a", "response_b"]])
-
 
 # ---------------------------------------------------------------------------
 # Dataset & callbacks
 # ---------------------------------------------------------------------------
+
 
 class ConcatenatedPreferenceDataset(Dataset):
     """
@@ -251,9 +231,9 @@ class ConcatenatedPreferenceDataset(Dataset):
         if self.augment and random.random() > 0.5:
             resp_a, resp_b = resp_b, resp_a
             if not self.is_test:
-                if label == 0:      # A wins -> B wins after swap
+                if label == 0:  # A wins -> B wins after swap
                     label = 1
-                elif label == 1:    # B wins -> A wins after swap
+                elif label == 1:  # B wins -> A wins after swap
                     label = 0
 
         # Tokenize the prompt
