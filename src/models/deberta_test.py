@@ -70,12 +70,12 @@ GRADIENT_CHECKPOINTING = False  # Set True to save memory at cost of compute
 RESUME_FROM_CHECKPOINT = False  # Set True to resume from last saved checkpoint
 
 # Dataset directories
-TRAIN_PATH = "data/train.csv"
-TEST_PATH = "data/test.csv"
+TRAIN_PATH = "../../data/train.csv"
+TEST_PATH = "../../data/test.csv"
 
 # Output directories
 OUTPUT_DIR = "./llm_preference_model_smart"
-TENSORBOARD_DIR = "./tf-logs"
+TENSORBOARD_DIR = "../../tf-logs"
 RUN_NAME = "trunc_2048_run"
 
 

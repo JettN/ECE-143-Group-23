@@ -18,7 +18,7 @@ import src.preprocessing.data_preprocssing_funcs as dp
 
 #==================================================Data Preprocessing==========================================
 SCRIPT_DIR = pathlib.Path(__file__).parent.absolute()
-DATA_PATH = SCRIPT_DIR / "data"
+DATA_PATH = SCRIPT_DIR.parent.parent / "data"
 
 data = pd.read_csv(DATA_PATH / "train.csv")
 test_data = pd.read_csv(DATA_PATH / "test.csv")
