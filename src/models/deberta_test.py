@@ -5,7 +5,7 @@ This module fine-tunes a Hugging Face `microsoft/deberta-v3-base` model
 to predict user preferences between two LLM responses (A vs B vs tie).
 
 Key features:
-- Uses preprocessed data from `data_preprocessing.py`
+- Loads data directly from CSV files (handles JSON string parsing)
 - Cross-encoder input format: [CLS] prompt [SEP] response_a [SEP] response_b [SEP]
 - Optional response swapping to reduce positional bias
 - Hugging Face Trainer API for training, evaluation, and checkpointing
@@ -13,6 +13,7 @@ Key features:
 """
 
 import random
+import json
 import pandas as pd
 import numpy as np
 import torch
@@ -38,20 +39,26 @@ from pathlib import Path
 # Environment & configuration
 # ---------------------------------------------------------------------------
 
-# Load proxy settings from network configuration.
-# This is specific to the environment where the script is executed and ensures
+# Load proxy settings from network configuration (optional).
+# This is specific to certain environments (e.g., AutoDL) and ensures
 # that any HTTP(S) requests (e.g., to Hugging Face Hub) respect the proxy.
-result = subprocess.run(
-    'bash -c "source /etc/network_turbo && env | grep proxy"',
-    shell=True,
-    capture_output=True,
-    text=True,
-)
-output = result.stdout
-for line in output.splitlines():
-    if "=" in line:
-        var, value = line.split("=", 1)
-        os.environ[var] = value
+# If the file doesn't exist, this will silently fail and continue without proxy.
+try:
+    result = subprocess.run(
+        'bash -c "source /etc/network_turbo && env | grep proxy"',
+        shell=True,
+        capture_output=True,
+        text=True,
+        check=False,  # Don't raise error if command fails
+    )
+    output = result.stdout
+    for line in output.splitlines():
+        if "=" in line:
+            var, value = line.split("=", 1)
+            os.environ[var] = value
+except Exception:
+    # Proxy configuration is optional, continue without it
+    pass
 
 # Hugging Face model to fine-tune
 MODEL_NAME = "microsoft/deberta-v3-base"
@@ -119,32 +126,89 @@ def get_latest_checkpoint(output_dir: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
-# Data loading & preprocessing (using external preprocessed module)
+# Data loading & preprocessing
 # ---------------------------------------------------------------------------
 
-print("Loading data...")
-
-df_train = pd.read_csv(TRAIN_PATH, engine="python")
-df_test = pd.read_csv(TEST_PATH, engine="python")
-
-# Convert one-hot encoded winner columns to single label: 0=A wins, 1=B wins, 2=tie
-df_train["label"] = (
-    df_train["winner_model_a"] * 0 + df_train["winner_model_b"] * 1 + df_train["winner_tie"] * 2
-)
-# Drop any rows with missing text (defensive cleaning)
-df_train = df_train.dropna(subset=["prompt", "response_a", "response_b"])
-print(f"Full dataset size: {len(df_train)}")
-
-if PROTOTYPE_FRAC < 1.0:
-    # Optionally downsample for quick prototyping while keeping label distribution balanced
-    print(f"Creating a {PROTOTYPE_FRAC * 100}% stratified prototype dataset...")
-    _, df_train = train_test_split(
-        df_train,
-        test_size=PROTOTYPE_FRAC,
-        random_state=42,
-        stratify=df_train["label"],
+def load_and_preprocess_data(train_path: str, test_path: str):
+    """
+    Load and preprocess training and test data.
+    
+    Handles:
+    - Parsing JSON strings to Python lists/strings
+    - Converting one-hot encoded winner columns to single label
+    - Cleaning missing data
+    
+    Args:
+        train_path: Path to training CSV file
+        test_path: Path to test CSV file
+        
+    Returns:
+        Tuple of (train_df, test_df) with preprocessed data
+    """
+    # Validate files exist
+    if not Path(train_path).exists():
+        raise FileNotFoundError(f"Training data not found: {train_path}")
+    if not Path(test_path).exists():
+        raise FileNotFoundError(f"Test data not found: {test_path}")
+    
+    print("Loading data...")
+    df_train = pd.read_csv(train_path, engine="python")
+    df_test = pd.read_csv(test_path, engine="python")
+    
+    # Parse JSON strings if they exist (prompt, response_a, response_b may be JSON strings)
+    list_cols = ["prompt", "response_a", "response_b"]
+    for col in list_cols:
+        if col in df_train.columns:
+            # Try to parse JSON strings, if it fails assume it's already a string
+            def parse_json_or_string(x):
+                if pd.isna(x):
+                    return ""
+                if isinstance(x, str):
+                    try:
+                        parsed = json.loads(x)
+                        # If it's a list, join into a single string
+                        if isinstance(parsed, list):
+                            return " ".join(str(item) for item in parsed)
+                        return str(parsed)
+                    except (json.JSONDecodeError, ValueError):
+                        return str(x)
+                return str(x)
+            
+            df_train[col] = df_train[col].apply(parse_json_or_string)
+        
+        if col in df_test.columns:
+            def parse_json_or_string(x):
+                if pd.isna(x):
+                    return ""
+                if isinstance(x, str):
+                    try:
+                        parsed = json.loads(x)
+                        if isinstance(parsed, list):
+                            return " ".join(str(item) for item in parsed)
+                        return str(parsed)
+                    except (json.JSONDecodeError, ValueError):
+                        return str(x)
+                return str(x)
+            
+            df_test[col] = df_test[col].apply(parse_json_or_string)
+    
+    # Convert one-hot encoded winner columns to single label
+    # Label mapping: 0 = model_a wins, 1 = model_b wins, 2 = tie
+    # This mapping is used consistently throughout the script
+    df_train["label"] = (
+        df_train["winner_model_a"] * 0 + df_train["winner_model_b"] * 1 + df_train["winner_tie"] * 2
     )
-    print(f"Prototype dataset size: {len(df_train)}")
+    
+    # Drop any rows with missing text (defensive cleaning)
+    initial_size = len(df_train)
+    df_train = df_train.dropna(subset=["prompt", "response_a", "response_b"])
+    if len(df_train) < initial_size:
+        print(f"Warning: {initial_size - len(df_train)} rows dropped due to missing prompt or responses.")
+    
+    print(f"Full dataset size: {len(df_train)}")
+    print(f"Test dataset size: {len(df_test)}")
+    
+    return df_train, df_test
 
 
 # ---------------------------------------------------------------------------
@@ -323,35 +387,51 @@ class TensorBoardCallback(TrainerCallback):
 
 
 # ---------------------------------------------------------------------------
-# Model, Trainer, and training loop
+# Main execution
 # ---------------------------------------------------------------------------
 
-# Optional: resume from the latest checkpoint if enabled.
-checkpoint_to_resume = None
-if RESUME_FROM_CHECKPOINT:
-    checkpoint_to_resume = get_latest_checkpoint(OUTPUT_DIR)
-    if checkpoint_to_resume:
-        print(f"Found checkpoint to resume from: {checkpoint_to_resume}")
-    else:
-        print("No checkpoint found. Starting training from scratch.")
+if __name__ == "__main__":
+    # Load and preprocess data
+    print("Loading and preprocessing data...")
+    df_train, df_test = load_and_preprocess_data(TRAIN_PATH, TEST_PATH)
 
-print("Initializing model and tokenizer...")
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)
+    if PROTOTYPE_FRAC < 1.0:
+        # Optionally downsample for quick prototyping while keeping label distribution balanced
+        print(f"Creating a {PROTOTYPE_FRAC * 100}% stratified prototype dataset...")
+        _, df_train = train_test_split(
+            df_train,
+            test_size=PROTOTYPE_FRAC,
+            random_state=42,
+            stratify=df_train["label"],
+        )
+        print(f"Prototype dataset size: {len(df_train)}")
 
-tensorboard_log_dir = os.path.join(TENSORBOARD_DIR, RUN_NAME)
-writer = SummaryWriter(log_dir=tensorboard_log_dir)
+    # Optional: resume from the latest checkpoint if enabled.
+    checkpoint_to_resume = None
+    if RESUME_FROM_CHECKPOINT:
+        checkpoint_to_resume = get_latest_checkpoint(OUTPUT_DIR)
+        if checkpoint_to_resume:
+            print(f"Found checkpoint to resume from: {checkpoint_to_resume}")
+        else:
+            print("No checkpoint found. Starting training from scratch.")
 
-print("Splitting data into train/validation...")
-train_df, val_df = train_test_split(
-    df_train, test_size=TEST_SIZE, random_state=42, stratify=df_train["label"]
-)
+    print("Initializing model and tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME, num_labels=3)
 
-train_dataset = ConcatenatedPreferenceDataset(train_df, tokenizer, MAX_LENGTH, augment=True)
-val_dataset = ConcatenatedPreferenceDataset(val_df, tokenizer, MAX_LENGTH, augment=False)
-test_dataset = ConcatenatedPreferenceDataset(df_test, tokenizer, MAX_LENGTH, is_test=True)
+    tensorboard_log_dir = os.path.join(TENSORBOARD_DIR, RUN_NAME)
+    writer = SummaryWriter(log_dir=tensorboard_log_dir)
 
-print(f"Training with {len(train_dataset)} samples, validating with {len(val_dataset)} samples.")
+    print("Splitting data into train/validation...")
+    train_df, val_df = train_test_split(
+        df_train, test_size=TEST_SIZE, random_state=42, stratify=df_train["label"]
+    )
+
+    train_dataset = ConcatenatedPreferenceDataset(train_df, tokenizer, MAX_LENGTH, augment=True)
+    val_dataset = ConcatenatedPreferenceDataset(val_df, tokenizer, MAX_LENGTH, augment=False)
+    test_dataset = ConcatenatedPreferenceDataset(df_test, tokenizer, MAX_LENGTH, is_test=True)
+
+    print(f"Training with {len(train_dataset)} samples, validating with {len(val_dataset)} samples.")
 
 
 def compute_metrics(p) -> dict:
@@ -383,75 +463,88 @@ def compute_metrics(p) -> dict:
     return {"accuracy": overall_acc, **per_class_acc}
 
 
-training_args = TrainingArguments(
-    output_dir=OUTPUT_DIR,
-    num_train_epochs=EPOCHS,
-    per_device_train_batch_size=BATCH_SIZE,
-    per_device_eval_batch_size=BATCH_SIZE,
-    gradient_accumulation_steps=GRAD_ACCUM_STEPS,
-    learning_rate=LEARNING_RATE,
-    warmup_ratio=0.1,
-    logging_steps=10,
-    eval_strategy="steps",
-    eval_steps=100,
-    save_strategy="steps",
-    save_steps=200,
-    save_total_limit=2,
-    load_best_model_at_end=True,
-    metric_for_best_model="accuracy",
-    fp16=True,
-    gradient_checkpointing=GRADIENT_CHECKPOINTING,
-    gradient_checkpointing_kwargs={"use_reentrant": False},
-    report_to="tensorboard",
-    logging_dir=tensorboard_log_dir,
-    dataloader_num_workers=4,
-    dataloader_pin_memory=True,
-    run_name=RUN_NAME,
-)
+    training_args = TrainingArguments(
+        output_dir=OUTPUT_DIR,
+        num_train_epochs=EPOCHS,
+        per_device_train_batch_size=BATCH_SIZE,
+        per_device_eval_batch_size=BATCH_SIZE,
+        gradient_accumulation_steps=GRAD_ACCUM_STEPS,
+        learning_rate=LEARNING_RATE,
+        warmup_ratio=0.1,
+        logging_steps=10,
+        eval_strategy="steps",
+        eval_steps=100,
+        save_strategy="steps",
+        save_steps=200,
+        save_total_limit=2,
+        load_best_model_at_end=True,
+        metric_for_best_model="accuracy",
+        fp16=True,
+        gradient_checkpointing=GRADIENT_CHECKPOINTING,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        report_to="tensorboard",
+        logging_dir=tensorboard_log_dir,
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
+        run_name=RUN_NAME,
+    )
 
-trainer = Trainer(
-    model=model,
-    args=training_args,
-    train_dataset=train_dataset,
-    eval_dataset=val_dataset,
-    compute_metrics=compute_metrics,
-    callbacks=[TensorBoardCallback(writer)],
-    data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
-)
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        train_dataset=train_dataset,
+        eval_dataset=val_dataset,
+        compute_metrics=compute_metrics,
+        callbacks=[TensorBoardCallback(writer)],
+        data_collator=DataCollatorWithPadding(tokenizer=tokenizer),
+    )
 
-print("Starting training...")
-trainer.train(resume_from_checkpoint=checkpoint_to_resume)
+    print("Starting training...")
+    print(f"Model: {MODEL_NAME}")
+    print(f"Max sequence length: {MAX_LENGTH}")
+    print(f"Batch size: {BATCH_SIZE} (gradient accumulation: {GRAD_ACCUM_STEPS})")
+    print(f"Effective batch size: {BATCH_SIZE * GRAD_ACCUM_STEPS}")
+    print(f"Learning rate: {LEARNING_RATE}")
+    print(f"Epochs: {EPOCHS}")
+    print(f"Device: {'CUDA' if torch.cuda.is_available() else 'CPU'}")
+    if torch.cuda.is_available():
+        print(f"GPU: {torch.cuda.get_device_name(0)}")
+    print("-" * 50)
 
-# ---------------------------------------------------------------------------
-# Evaluation on validation set
-# ---------------------------------------------------------------------------
+    trainer.train(resume_from_checkpoint=checkpoint_to_resume)
 
-print("Analyzing validation performance...")
-val_predictions = trainer.predict(val_dataset)
-val_logits = torch.from_numpy(val_predictions.predictions)
-val_probs = F.softmax(val_logits, dim=1).numpy()
-val_preds = np.argmax(val_probs, axis=1)
-val_labels = val_predictions.label_ids
+    # ---------------------------------------------------------------------------
+    # Evaluation on validation set
+    # ---------------------------------------------------------------------------
 
-cm = confusion_matrix(val_labels, val_preds)
-print("Validation Confusion Matrix:")
-print(cm)
+    print("Analyzing validation performance...")
+    val_predictions = trainer.predict(val_dataset)
+    val_logits = torch.from_numpy(val_predictions.predictions)
+    val_probs = F.softmax(val_logits, dim=1).numpy()
+    val_preds = np.argmax(val_probs, axis=1)
+    val_labels = val_predictions.label_ids
 
-# ---------------------------------------------------------------------------
-# Inference on test set & submission file
-# ---------------------------------------------------------------------------
+    cm = confusion_matrix(val_labels, val_preds)
+    print("Validation Confusion Matrix:")
+    print(cm)
 
-print("Generating predictions on test set...")
-predictions = trainer.predict(test_dataset)
-logits = torch.from_numpy(predictions.predictions)
-probs = F.softmax(logits, dim=1).numpy()
+    # ---------------------------------------------------------------------------
+    # Inference on test set & submission file
+    # ---------------------------------------------------------------------------
 
-print("Creating submission file...")
-submission_df = pd.DataFrame({"id": df_test["id"]})
-submission_df["winner_model_a"] = probs[:, 0]
-submission_df["winner_model_b"] = probs[:, 1]
-submission_df["winner_model_tie"] = probs[:, 2]
+    print("Generating predictions on test set...")
+    predictions = trainer.predict(test_dataset)
+    logits = torch.from_numpy(predictions.predictions)
+    probs = F.softmax(logits, dim=1).numpy()
 
-submission_df.to_csv("submission_test.csv", index=False)
-print("'submission_test.csv' created.")
-writer.close()
+    print("Creating submission file...")
+    # Label mapping: 0 = model_a wins, 1 = model_b wins, 2 = tie
+    # Map probabilities accordingly
+    submission_df = pd.DataFrame({"id": df_test["id"]})
+    submission_df["winner_model_a"] = probs[:, 0]  # Class 0: model_a wins
+    submission_df["winner_model_b"] = probs[:, 1]  # Class 1: model_b wins
+    submission_df["winner_tie"] = probs[:, 2]      # Class 2: tie
+
+    submission_df.to_csv("submission_test.csv", index=False)
+    print("'submission_test.csv' created.")
+    writer.close()
