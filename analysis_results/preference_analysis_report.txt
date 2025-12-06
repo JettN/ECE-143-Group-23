@@ -1,0 +1,47 @@
+================================================================================
+LLM PREFERENCE ANALYSIS REPORT
+================================================================================
+
+QUESTION 1: Prediction Difficulty Due to Personal Preference Noise
+--------------------------------------------------------------------------------
+
+Analysis shows that predicting user preferences is challenging due to:
+
+1. Balanced Distribution:
+   - Model A wins: 34.9%
+   - Model B wins: 34.2%
+   - Ties: 30.9%
+   → This near-even split suggests high variability in preferences
+
+2. High Entropy in Model Comparisons:
+   - Average normalized entropy: 0.893
+   - High variability pairs: 1038
+   → Personal preferences introduce significant noise
+
+CONCLUSION: It is hard to predict which LLM models users prefer
+solely based on model responses due to noise from users' personal
+preference. The data shows high variability and balanced distributions,
+indicating that individual preferences play a significant role.
+
+
+QUESTION 2: Which LLM Models Do Users Prefer?
+--------------------------------------------------------------------------------
+
+To answer our original question 'which LLM model do users prefer?':
+
+Users tend to prefer models developed by OpenAI:
+
+  - OpenAI average win rate: 0.403
+  - Total OpenAI comparisons: 31,840
+  - Number of OpenAI models: 9
+
+  OpenAI Models:
+    - gpt-4-1106-preview: win rate 0.551
+    - gpt-3.5-turbo-0314: win rate 0.546
+    - gpt-4-0125-preview: win rate 0.514
+    - gpt-4-0314: win rate 0.484
+    - gpt-4-0613: win rate 0.397
+
+See the heatmap visualization for detailed model comparison patterns.
+
+================================================================================
