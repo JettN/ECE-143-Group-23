@@ -13,26 +13,36 @@ To manage these large dataset files efficiently within Git, we will use Git Larg
 
 - After that, you can commit and push normally
 
-# File Structure
+# Repo Structure
 ```
-ECE-143-Group-23/ 
+ECE-143-Group-23/
+├── analysis_results/ # Images and report generated from analyzing model
+│
 ├── data/ # Raw CSVs 
 │
 ├── notebooks/ # Jupyter notebook
-│ └── data_visualization.ipynb # Notebook showing visualizations 
+│ └── Preference_Analysis.ipynb # Notebook showing visualizations of model evaluation
+│ └── data_visualization.ipynb  # Notebook showing visualizations of dataset
 │
-├── src/ # All Python scripts 
+├── src/ # All Python scripts
+│ │
+│ ├── analysis/ # LLM Model Preference Analysis Code
+│ │ ├── README.md                  # Explains findings from analysis script
+│ │ └── preference_analysis.py     # Script analyzing model preference in the dataset (from notebook)
 │ │
 │ ├── models/ # Model training and evaluation
-│ │ ├── deberta_test.py # Main training script
-│ │ └── model_evaluation.py # Comprehensive evaluation script 
+│ │ ├── deberta_test.py            # Main training script
+│ │ ├── deberta_test_v2.py         # Training script with similarity features implemented
+│ │ ├── deberta_with_similarity.py # Module extending the DeBERTa model to incorporate similarity features
+│ │ ├── model_evaluation.py        # Comprehensive evaluation script 
+│ │ └── similarity_features.py     # Module to calculate similarity features
 │ │
 │ ├── preprocessing/ # Data preprocessing code 
-│ │ ├── data_preprocessing.py # main preprocessing script 
-│ │ └── data_preprocessing_funcs.py
+│ │ ├── data_preprocessing.py       # Main preprocessing script (from notebook)
+│ │ └── data_preprocessing_funcs.py # Helper Functions
 │ │
 │ └── visualization/ # Visualization code 
-│   └── data_visualization.py 
+│   └── data_visualization.py      # Main data visualization script (from notebook)
 │
 ├── tf-logs/trunc_2048_run/ # TensorBoard logs for generating images  
 │
@@ -73,7 +83,9 @@ ECE-143-Group-23/
 
 ## 1. Navigate to the root of the repository
   Open a terminal and move into the top-level project folder
-  `cd ECE-143-Group-23`
+  ```bash
+  cd ECE-143-Group-23
+  ```
 
 ## 2. Environment Setup
 
