@@ -1,2 +1,9 @@
 llm_preference_model_prototype/
 *.code-workspace
+
+# AWS scripts and credentials
+aws_*.sh
+AWS_*.md
+*.pem
+*credentials*
+.aws/
