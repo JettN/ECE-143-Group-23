@@ -21,8 +21,7 @@ ECE-143-Group-23/
 ├── data/ # Raw CSVs 
 │
 ├── notebooks/ # Jupyter notebook
-│ └── Preference_Analysis.ipynb # Notebook showing visualizations of model evaluation
-│ └── data_visualization.ipynb  # Notebook showing visualizations of dataset
+│ └── data_visualization.ipynb  # Notebook containing all visualizations 
 │
 ├── src/ # All Python scripts
 │ │
